@@ -103,6 +103,20 @@ Its exit code distinguishes all three verdicts, so it composes with other tools:
 | `--ping-timeout` | `2s` | per-request timeout |
 | `--verbose` | `false` | log healthy checks too |
 
+## Behaviour at boot
+
+The service can start before NetworkManager has associated the interface. The
+daemon deliberately does **not** treat that as a fatal error: an absent
+interface or a device with no active profile is an `unknown` verdict, so it logs
+and keeps running rather than exiting. A watchdog that refuses to start while
+the link is down is absent exactly when it is needed.
+
+When `--connection` is not given, the profile name is learned from the device
+and remembered, because a disconnected device no longer reports which profile it
+was using — and that is when recovery needs the name. If no name has ever been
+observed, recovery is skipped with an explicit error rather than activating some
+other profile and possibly joining the wrong network.
+
 ## Privileges
 
 Needs root (or `CAP_NET_RAW` plus `CAP_NET_ADMIN`) for the raw ICMP socket,

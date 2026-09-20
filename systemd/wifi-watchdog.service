@@ -12,6 +12,9 @@ Type=simple
 # a silent way to end up with no watchdog at all. It also keeps the
 # consecutive-failure and cooldown state in memory instead of on disk.
 ExecStart=/usr/local/bin/wifi-watchdog run --iface=wlan0
+# Restart=always is a backstop, not the mechanism: the daemon is designed not to
+# exit when the link is down at boot (it would then be absent precisely when it
+# is needed), so a restart here means something genuinely unexpected happened.
 Restart=always
 RestartSec=10s
 Nice=10

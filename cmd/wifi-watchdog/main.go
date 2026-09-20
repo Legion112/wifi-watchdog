@@ -108,23 +108,6 @@ func (c commonFlags) logger(out *os.File) *slog.Logger {
 	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level}))
 }
 
-// resolveConnection fills in the profile name from the live device when the
-// operator did not name one, so the tool is not pinned to one SSID.
-func resolveConnection(ctx context.Context, r watchdog.Runner, cfg watchdog.Config) (watchdog.Config, error) {
-	if cfg.Connection != "" {
-		return cfg, nil
-	}
-	dev, err := watchdog.QueryDevice(ctx, r, cfg.Iface)
-	if err != nil {
-		return cfg, fmt.Errorf("cannot determine the connection on %s: %w (pass -connection)", cfg.Iface, err)
-	}
-	if dev.Connection == "" {
-		return cfg, fmt.Errorf("no connection is active on %s; pass -connection", cfg.Iface)
-	}
-	cfg.Connection = dev.Connection
-	return cfg, nil
-}
-
 func runDaemon(args []string, out *os.File) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	common := addCommonFlags(fs)
@@ -146,11 +129,12 @@ func runDaemon(args []string, out *os.File) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	r := watchdog.ExecRunner{}
-	if cfg, err = resolveConnection(ctx, r, cfg); err != nil {
-		return err
-	}
-	return watchdog.New(r, watchdog.ICMPPinger{}, common.logger(out), cfg).Run(ctx)
+	// Deliberately no eager connection lookup here. At boot this service can
+	// start before NetworkManager has associated the interface, and exiting
+	// then would mean the watchdog is absent exactly when the link is down --
+	// the opposite of its job. The profile name is learned on the first tick
+	// that sees one.
+	return watchdog.New(watchdog.ExecRunner{}, watchdog.ICMPPinger{}, common.logger(out), cfg).Run(ctx)
 }
 
 func runCheck(args []string, out *os.File) error {
@@ -208,11 +192,7 @@ func runRecover(args []string, out *os.File) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	r := watchdog.ExecRunner{}
-	if cfg, err = resolveConnection(ctx, r, cfg); err != nil {
-		return err
-	}
-	res := watchdog.New(r, watchdog.ICMPPinger{}, common.logger(out), cfg).Tick(ctx)
+	res := watchdog.New(watchdog.ExecRunner{}, watchdog.ICMPPinger{}, common.logger(out), cfg).Tick(ctx)
 	if res.Health.Verdict != watchdog.Healthy {
 		return fmt.Errorf("%s", res.Health)
 	}

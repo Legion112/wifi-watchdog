@@ -116,17 +116,24 @@ type Watchdog struct {
 
 	consecutiveFailures int
 	lastRecovery        time.Time
+
+	// connection is the profile to reactivate. When the operator did not name
+	// one it is learned from the device and remembered, because a disconnected
+	// device no longer reports which profile it was using -- and that is
+	// exactly when recovery needs the name.
+	connection string
 }
 
 // New builds a Watchdog.
 func New(r Runner, p Prober, log *slog.Logger, cfg Config) *Watchdog {
 	return &Watchdog{
-		cfg:   cfg.WithDefaults(),
-		r:     r,
-		p:     p,
-		log:   log,
-		now:   time.Now,
-		sleep: realSleep,
+		cfg:        cfg.WithDefaults(),
+		r:          r,
+		p:          p,
+		log:        log,
+		now:        time.Now,
+		sleep:      realSleep,
+		connection: cfg.Connection,
 	}
 }
 
@@ -142,6 +149,14 @@ type TickResult struct {
 func (w *Watchdog) Tick(ctx context.Context) TickResult {
 	h := Check(ctx, w.r, w.p, w.cfg.checkConfig())
 	res := TickResult{Health: h}
+
+	// Remember the profile while the device still reports one.
+	if w.cfg.Connection == "" && h.Device.Connection != "" {
+		if w.connection != h.Device.Connection {
+			w.log.Info("learned connection profile", "connection", h.Device.Connection, "iface", w.cfg.Iface)
+		}
+		w.connection = h.Device.Connection
+	}
 
 	switch h.Verdict {
 	case Healthy:
@@ -178,8 +193,18 @@ func (w *Watchdog) Tick(ctx context.Context) TickResult {
 		}
 	}
 
+	if w.connection == "" {
+		// Blindly activating some other profile could join the wrong network.
+		res.Suppressed = "no connection profile known"
+		w.log.Error("cannot recover: no connection profile known for interface; pass -connection",
+			"iface", w.cfg.Iface)
+		return res
+	}
+
 	w.lastRecovery = w.now()
-	outcome, after := recoverWith(ctx, w.r, w.p, w.log, w.cfg.recoverConfig(), w.sleep)
+	rc := w.cfg.recoverConfig()
+	rc.Connection = w.connection
+	outcome, after := recoverWith(ctx, w.r, w.p, w.log, rc, w.sleep)
 	res.Acted, res.Outcome, res.Health = true, outcome, after
 	if outcome == RecoveryFailed {
 		w.log.Error("recovery failed", "outcome", outcome.String(), "reason", after.Reason)
@@ -190,10 +215,17 @@ func (w *Watchdog) Tick(ctx context.Context) TickResult {
 	return res
 }
 
+func orAuto(s string) string {
+	if s == "" {
+		return "(auto-detect)"
+	}
+	return s
+}
+
 // Run checks on Interval until ctx is cancelled.
 func (w *Watchdog) Run(ctx context.Context) error {
 	w.log.Info("watchdog started",
-		"iface", w.cfg.Iface, "connection", w.cfg.Connection,
+		"iface", w.cfg.Iface, "connection", orAuto(w.connection),
 		"interval", w.cfg.Interval, "threshold", w.cfg.FailureThreshold,
 		"cooldown", w.cfg.Cooldown, "allow_restart", w.cfg.AllowRestart)
 

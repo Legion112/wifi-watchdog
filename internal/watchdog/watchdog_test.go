@@ -303,3 +303,91 @@ func TestRecoveryOutcome_String(t *testing.T) {
 		}
 	}
 }
+
+// bootRunner models the state at boot: NetworkManager is up but has not
+// associated the interface yet, so it reports no connection at all.
+func bootRunner() *RecordingRunner {
+	r := NewRecordingRunner()
+	r.Outputs["nmcli -t -f DEVICE,STATE,CONNECTION device status"] = "wlan0:disconnected:"
+	r.Outputs["ip -4 route show default dev wlan0"] = "\n"
+	return r
+}
+
+// Regression: the daemon used to resolve the profile name eagerly at startup
+// and exit non-zero when nothing was active yet, so at boot it died and was
+// only kept alive by Restart=always -- absent exactly when the link was down.
+func TestTick_NoConnectionKnownDoesNotActivateBlindly(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Connection = "" // nothing configured, nothing learned yet
+	r := bootRunner()
+	w, _ := newTestWatchdog(r, &fakeProber{}, cfg)
+
+	res := w.Tick(context.Background())
+	if res.Acted {
+		t.Fatal("must not act without knowing which profile to bring up")
+	}
+	if res.Suppressed != "no connection profile known" {
+		t.Fatalf("suppression reason = %q", res.Suppressed)
+	}
+	if strings.Contains(r.CallLog(), "connection up") {
+		t.Fatalf("must not guess a profile:\n%s", r.CallLog())
+	}
+}
+
+// The name is learned while the device still reports one, because a
+// disconnected device no longer does -- which is when recovery needs it.
+func TestTick_LearnsAndRemembersConnectionName(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Connection = ""
+	r := deviceRunner()
+	r.Outputs["ip -4 route show default dev wlan0"] = routeViaISP
+	w, _ := newTestWatchdog(r, &fakeProber{}, cfg)
+
+	if res := w.Tick(context.Background()); res.Health.Verdict != Healthy {
+		t.Fatalf("expected a healthy first tick, got %s", res.Health.Verdict)
+	}
+	if w.connection != "MTS_GPON_2F34" {
+		t.Fatalf("connection = %q, want the learned name", w.connection)
+	}
+
+	// The link now drops and nmcli reports no connection for the device.
+	r.Outputs["nmcli -t -f DEVICE,STATE,CONNECTION device status"] = "wlan0:disconnected:"
+	res := w.Tick(context.Background())
+	if !res.Acted {
+		t.Fatal("should recover using the remembered profile")
+	}
+	if !strings.Contains(r.CallLog(), "connection up MTS_GPON_2F34") {
+		t.Fatalf("expected the learned profile to be reactivated:\n%s", r.CallLog())
+	}
+}
+
+// An explicit -connection must win and must not be overwritten by whatever the
+// device happens to report.
+func TestTick_ExplicitConnectionIsNotOverriddenByDevice(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Connection = "Chosen"
+	r := deviceRunner()
+	r.Outputs["ip -4 route show default dev wlan0"] = routeViaISP
+	w, _ := newTestWatchdog(r, &fakeProber{}, cfg)
+	w.Tick(context.Background())
+	if w.connection != "Chosen" {
+		t.Fatalf("connection = %q, want the configured name", w.connection)
+	}
+}
+
+// At boot the interface may not exist yet. That is indeterminate, so the
+// daemon must keep running and take no action rather than exiting.
+func TestTick_MissingInterfaceAtBootIsUnknownAndSurvives(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Connection = ""
+	r := NewRecordingRunner()
+	r.Outputs["nmcli -t -f DEVICE,STATE,CONNECTION device status"] = "lo:connected (externally):lo"
+	w, _ := newTestWatchdog(r, &fakeProber{}, cfg)
+	res := w.Tick(context.Background())
+	if res.Health.Verdict != Unknown {
+		t.Fatalf("verdict = %s, want unknown", res.Health.Verdict)
+	}
+	if res.Acted {
+		t.Fatal("must not act")
+	}
+}
