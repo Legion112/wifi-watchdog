@@ -1,0 +1,37 @@
+[Unit]
+Description=Wi-Fi reconnect watchdog (NetworkManager)
+Documentation=https://github.com/Legion112/wifi-watchdog
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+# A long-running service rather than a timer + oneshot. A timer using
+# OnBootSec= together with OnUnitActiveSec= stops firing for the rest of the
+# boot if it is ever re-enabled after the OnBootSec window has passed, which is
+# a silent way to end up with no watchdog at all. It also keeps the
+# consecutive-failure and cooldown state in memory instead of on disk.
+ExecStart=/usr/local/bin/wifi-watchdog run --iface=wlan0
+Restart=always
+RestartSec=10s
+Nice=10
+
+# Root for nmcli device operations, restarting NetworkManager, and the raw
+# ICMP socket. Without the ICMP capability the health check reports
+# "indeterminate" and deliberately takes no action.
+User=root
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+# Modest hardening: it needs the network and D-Bus, nothing else.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
